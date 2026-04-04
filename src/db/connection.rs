@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 pub async fn init_db(url: &str) -> PgPool {
     PgPoolOptions::new()

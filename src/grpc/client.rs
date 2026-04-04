@@ -9,7 +9,7 @@ pub async fn connect(endpoint: &str) -> Channel {
         .expect("Failed to configure TLS")
         .http2_adaptive_window(true)
         .initial_connection_window_size(1 << 23) // 8 MB
-        .initial_stream_window_size(1 << 23)     // 8 MB
+        .initial_stream_window_size(1 << 23) // 8 MB
         .tcp_keepalive(Some(Duration::from_secs(10)))
         .connect_timeout(Duration::from_secs(15))
         .connect()

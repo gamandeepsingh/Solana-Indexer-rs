@@ -1,4 +1,3 @@
-
 pub const LARGE_TRANSFER_THRESHOLD_SOL: f64 = 1.0;
 
 pub fn is_large_transfer(amount: f64) -> bool {

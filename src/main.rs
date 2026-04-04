@@ -25,7 +25,11 @@ async fn main() {
     let db_pool = db::connection::init_db(&config.database_url).await;
     println!("{} Database connected", "✓".green().bold());
 
-    println!("{} Connecting to {}", "→".dimmed(), config.grpc_endpoint.cyan());
+    println!(
+        "{} Connecting to {}",
+        "→".dimmed(),
+        config.grpc_endpoint.cyan()
+    );
     let channel = grpc::client::connect(&config.grpc_endpoint).await;
     println!("{} gRPC connected\n", "✓".green().bold());
 
