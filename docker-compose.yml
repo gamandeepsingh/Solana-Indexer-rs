@@ -1,0 +1,36 @@
+services:
+  # ── Indexer (connects to DATABASE_URL from .env — e.g. Supabase) ──────────
+  indexer:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+
+  # ── Local PostgreSQL (optional — use when DATABASE_URL points here) ────────
+  # To use: set DATABASE_URL=postgresql://postgres:postgres@postgres:5432/solana_indexer
+  # and uncomment the depends_on block below.
+  #
+  # depends_on:
+  #   postgres:
+  #     condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: solana_indexer
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - local-db   # only starts when: docker-compose --profile local-db up -d
+
+volumes:
+  postgres_data:
