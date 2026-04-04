@@ -37,7 +37,9 @@ pub async fn batch_insert_transactions(
     }
     let mut qb = QueryBuilder::new("INSERT INTO transactions (signature, slot, success) ");
     qb.push_values(&items, |mut b, tx| {
-        b.push_bind(&tx.signature).push_bind(tx.slot).push_bind(true);
+        b.push_bind(&tx.signature)
+            .push_bind(tx.slot)
+            .push_bind(true);
     });
     qb.push(" ON CONFLICT DO NOTHING");
     qb.build().execute(pool).await?;
@@ -49,8 +51,7 @@ pub async fn batch_insert_failed(pool: &PgPool, txs: &[Transaction]) -> Result<(
     if items.is_empty() {
         return Ok(());
     }
-    let mut qb =
-        QueryBuilder::new("INSERT INTO failed_transactions (signature, slot, error) ");
+    let mut qb = QueryBuilder::new("INSERT INTO failed_transactions (signature, slot, error) ");
     qb.push_values(&items, |mut b, tx| {
         b.push_bind(&tx.signature)
             .push_bind(tx.slot)

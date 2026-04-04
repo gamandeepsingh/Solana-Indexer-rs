@@ -5,13 +5,11 @@ use colored::Colorize;
 use sqlx::PgPool;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::StreamExt;
-use tonic::{metadata::MetadataValue, transport::Channel, Request, Status};
+use tonic::{Request, Status, metadata::MetadataValue, transport::Channel};
 use yellowstone_grpc_proto::geyser::{
-    geyser_client::GeyserClient,
-    subscribe_update::UpdateOneof,
     CommitmentLevel, SubscribeRequest, SubscribeRequestFilterSlots,
-    SubscribeRequestFilterTransactions, SubscribeUpdateTransaction,
-    SubscribeUpdateTransactionInfo,
+    SubscribeRequestFilterTransactions, SubscribeUpdateTransaction, SubscribeUpdateTransactionInfo,
+    geyser_client::GeyserClient, subscribe_update::UpdateOneof,
 };
 
 use crate::db::queries::upsert_account;
@@ -50,23 +48,23 @@ pub async fn start_stream(
     };
 
     if tx.send(request).await.is_err() {
-        eprintln!("{} Failed to send subscribe request", "[ERROR]".red().bold());
+        eprintln!(
+            "{} Failed to send subscribe request",
+            "[ERROR]".red().bold()
+        );
         return;
     }
 
     let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-    let mut client = GeyserClient::with_interceptor(
-        channel,
-        move |mut req: Request<()>| {
-            if let Some(ref token) = x_token {
-                let val = MetadataValue::try_from(token.as_str())
-                    .map_err(|_| Status::internal("Invalid x-token value"))?;
-                req.metadata_mut().insert("x-token", val);
-            }
-            Ok(req)
-        },
-    )
+    let mut client = GeyserClient::with_interceptor(channel, move |mut req: Request<()>| {
+        if let Some(ref token) = x_token {
+            let val = MetadataValue::try_from(token.as_str())
+                .map_err(|_| Status::internal("Invalid x-token value"))?;
+            req.metadata_mut().insert("x-token", val);
+        }
+        Ok(req)
+    })
     .max_decoding_message_size(64 * 1024 * 1024);
 
     let mut stream = match client.subscribe(request_stream).await {
@@ -98,7 +96,10 @@ pub async fn start_stream(
                 }
                 Some(UpdateOneof::Slot(slot)) => {
                     let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
-                    let parent = slot.parent.map(|p| p.to_string()).unwrap_or_else(|| "—".into());
+                    let parent = slot
+                        .parent
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "—".into());
                     println!(
                         "{} {} - Slot: {} (Parent: {})",
                         "[SLOT]".cyan().bold(),
@@ -138,7 +139,11 @@ fn parse_transaction(tx_update: &SubscribeUpdateTransaction) -> Option<Transacti
     let signature = bs58::encode(&tx_info.signature).into_string();
     let slot = tx_update.slot as i64;
 
-    let failed = tx_info.meta.as_ref().map(|m| m.err.is_some()).unwrap_or(false);
+    let failed = tx_info
+        .meta
+        .as_ref()
+        .map(|m| m.err.is_some())
+        .unwrap_or(false);
 
     let amount = tx_info
         .meta
@@ -157,7 +162,15 @@ fn parse_transaction(tx_update: &SubscribeUpdateTransaction) -> Option<Transacti
     let memo = extract_memo(tx_info);
     let (from, to) = extract_transfer_parties(tx_info);
 
-    Some(Transaction { signature, slot, amount, failed, memo, from, to })
+    Some(Transaction {
+        signature,
+        slot,
+        amount,
+        failed,
+        memo,
+        from,
+        to,
+    })
 }
 
 fn extract_transfer_parties(
@@ -178,7 +191,12 @@ fn extract_transfer_parties(
     let mut max_increase: i64 = 0;
     let mut receiver_idx: Option<usize> = None;
 
-    for (i, (&pre, &post)) in meta.pre_balances.iter().zip(meta.post_balances.iter()).enumerate() {
+    for (i, (&pre, &post)) in meta
+        .pre_balances
+        .iter()
+        .zip(meta.post_balances.iter())
+        .enumerate()
+    {
         let delta = pre as i64 - post as i64;
         if delta > max_decrease {
             max_decrease = delta;
