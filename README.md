@@ -11,6 +11,7 @@ A high-performance Solana blockchain indexer written in Rust. Streams live data 
 
 ## Architecture
 
+<img width="1536" height="1024" alt="architect" src="https://github.com/user-attachments/assets/c5c9bb1c-cf97-4c7d-b8d6-cc1ccb43665a" />
 
 - **Transaction queue** (bounded 1000): decouples the stream from DB writes, provides backpressure
 - **Account upserts**: spawned directly — keeps the unique account registry up to date
@@ -39,6 +40,8 @@ A high-performance Solana blockchain indexer written in Rust. Streams live data 
 
 [MEMO] 2026-04-04T17:26:35.412Z - Payment ID: TXN_12345
 ```
+<img width="513" height="317" alt="Screenshot 2026-04-05 at 1 30 32 AM" src="https://github.com/user-attachments/assets/7925892e-1b60-45dd-b967-907886129fda" />
+
 
 | Prefix | Color | Meaning |
 |---|---|---|
