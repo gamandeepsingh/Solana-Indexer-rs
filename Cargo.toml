@@ -1,0 +1,21 @@
+[package]
+name = "solana-indexer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.14", features = ["transport", "tls-native-roots", "tls-ring"] }
+
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "macros", "runtime-tokio-rustls"] }
+
+dotenv = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+bs58 = "0.5.1"
+tokio-stream = { version = "0.1", features = ["net"] }
+
+yellowstone-grpc-proto = "12.1.0"
+chrono = "0.4"
+colored = "2"
