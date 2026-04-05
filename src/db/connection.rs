@@ -5,9 +5,9 @@ use sqlx::postgres::PgPoolOptions;
 
 pub async fn init_db(url: &str) -> PgPool {
     PgPoolOptions::new()
-        .max_connections(50)
-        .min_connections(10)
-        .acquire_timeout(Duration::from_secs(30))
+        .max_connections(10)
+        .min_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
         .idle_timeout(Duration::from_secs(60))
         .connect(url)
         .await
