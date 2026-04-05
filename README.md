@@ -7,6 +7,8 @@
 
 A high-performance Solana blockchain indexer written in Rust. Streams live data via **Yellowstone gRPC**, filters it, and stores it in **PostgreSQL** in real-time.
 
+Blog: [link](https://medium.com/@gamandeepsingh4/building-a-real-time-solana-indexer-in-rust-a-complete-guide-edcf64119691)
+
 ---
 
 ## Architecture
