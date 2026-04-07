@@ -1,6 +1,7 @@
 mod config;
 mod db;
 mod grpc;
+mod metrics;
 mod models;
 mod processor;
 mod workers;
@@ -22,7 +23,7 @@ async fn main() {
     let config = Config::from_env();
 
     println!("{} Connecting to database...", "→".dimmed());
-    let db_pool = db::connection::init_db(&config.database_url).await;
+    let write_pool = db::connection::init_write_pool(&config.database_url).await;
     println!("{} Database connected", "✓".green().bold());
 
     println!(
@@ -34,23 +35,40 @@ async fn main() {
     println!("{} gRPC connected\n", "✓".green().bold());
 
     println!("{}", "  Streaming live Solana transactions...".bold());
+    println!(
+        "{} Benchmark logging → {}",
+        "→".dimmed(),
+        config.bench_log.cyan()
+    );
     println!("{}", "─".repeat(60).dimmed());
 
-    let (sender, receiver) = workers::queue::create_queue();
-    let worker = tokio::spawn(workers::queue::start_worker(
-        receiver,
-        db_pool.clone(),
+    let m = metrics::Metrics::new();
+
+    let (tx_sender, tx_receiver) = workers::queue::create_queue();
+    let (acct_sender, acct_receiver) = workers::queue::create_acct_queue();
+
+    let tx_worker = tokio::spawn(workers::queue::start_worker(
+        tx_receiver,
+        write_pool.clone(),
         config.console_log,
+        m.clone(),
     ));
+    let acct_worker = tokio::spawn(workers::queue::start_account_worker(
+        acct_receiver,
+        write_pool.clone(),
+        m.clone(),
+    ));
+    let reporter = tokio::spawn(metrics::start_reporter(m.clone(), 300, config.bench_log));
 
     tokio::select! {
-        _ = grpc::stream::start_stream(channel, sender, db_pool, config.x_token) => {}
+        _ = grpc::stream::start_stream(channel, tx_sender, acct_sender, config.x_token, m) => {}
         _ = tokio::signal::ctrl_c() => {
             println!("\n{} Shutting down gracefully...", "[INFO]".blue().bold());
         }
     }
 
-    // sender is dropped here — worker drains remaining txs then exits
-    worker.await.ok();
+    reporter.abort();
+    tx_worker.await.ok();
+    acct_worker.await.ok();
     println!("{} Goodbye!", "[INFO]".blue().bold());
 }

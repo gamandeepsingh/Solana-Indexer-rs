@@ -5,6 +5,7 @@ pub struct Config {
     pub database_url: String,
     pub x_token: Option<String>,
     pub console_log: bool,
+    pub bench_log: String,
 }
 
 impl Config {
@@ -17,6 +18,7 @@ impl Config {
             database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             x_token: env::var("X_TOKEN").ok(),
             console_log,
+            bench_log: env::var("BENCH_LOG").unwrap_or_else(|_| "benchmark.log".to_string()),
         }
     }
 }
