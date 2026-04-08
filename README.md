@@ -12,40 +12,8 @@ Blog: [link](https://medium.com/@gamandeepsingh4/building-a-real-time-solana-ind
 ---
 
 ## Architecture
+<img width="1199" height="1312" alt="arch1" src="https://github.com/user-attachments/assets/b0a9f41e-41db-4341-9a90-44b3b2d61718" />
 
-<img width="1536" height="1024" alt="architect" src="https://github.com/user-attachments/assets/c5c9bb1c-cf97-4c7d-b8d6-cc1ccb43665a" />
-
-```
-Yellowstone gRPC (Solana validator stream)
-        │
-        ▼
-  grpc/stream.rs          ← TLS channel, subscribe, parse
-        │
-        ├──► [SLOT update] → print to terminal
-        │
-        └──► [TX update]
-                │
-                ├── fee payer → acct_queue (unbounded, non-blocking)
-                │                    │
-                │               account worker
-                │               batch 200 / 2s → accounts table
-                │
-                └── parse_transaction()
-                        │
-                        ▼
-              tx_queue (unbounded — never blocks, never drops)
-                        │
-                        ▼
-              workers/queue.rs (batch worker)
-              collect 200 txns or 100ms timer
-                        │
-               tokio::join! (4 parallel writes)
-               ┌─────────┬──────────┬────────┬──────────────┐
-               ▼         ▼          ▼        ▼
-          COPY into  batch INSERT  batch    batch INSERT
-          transactions failed_txns memos  large_transfers
-          (via staging table)
-```
 
 ### Key design decisions
 
