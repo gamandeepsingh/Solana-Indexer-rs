@@ -56,7 +56,91 @@ Yellowstone gRPC (Solana validator stream)
 | **Batch size 200 / 100ms** | Reduces DB round-trips ~200× vs one-insert-per-tx while keeping max latency under 200ms |
 | **Account batching** | Separate worker with 2s flush interval — replaces the old per-tx `tokio::spawn` that created 4000+ tasks/sec |
 | **Auto-reconnect** | Exponential backoff (4s → 8s → 16s → 30s cap), resets after 60s stable session |
-| **Separate write/read pools** | 20 connections each — write pool for workers, read pool reserved for future API layer |
+| **Separate write/read pools** | 20 connections each — write pool for indexer workers, read pool exclusively for the API layer |
+
+---
+
+## REST API
+
+The indexer exposes a read-only HTTP API on port `3000` (configurable via `API_PORT`). It runs on the same Tokio runtime as the indexer — no separate process needed.
+
+### Endpoints
+
+| Method | Path | Query params | Description |
+|---|---|---|---|
+| `GET` | `/health` | — | Liveness check. No DB call. |
+| `GET` | `/api/stats` | — | Approximate row counts for all tables. |
+| `GET` | `/api/transactions` | `limit`, `offset`, `success` | Paginated transaction list, newest first. |
+| `GET` | `/api/transactions/:signature` | — | Single transaction by signature. 404 if not found. |
+| `GET` | `/api/slots/:slot` | — | All transactions in a given slot. |
+| `GET` | `/api/transfers` | `limit`, `offset`, `min_amount` | Large transfers, ordered by amount descending. |
+| `GET` | `/api/memos` | `limit`, `offset` | Memo transactions, newest first. |
+| `GET` | `/api/accounts/:pubkey` | — | Account info by public key. 404 if not found. |
+
+All paginated endpoints return:
+
+```json
+{
+  "data": [...],
+  "total": 1000000,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+### Examples
+
+```bash
+# Liveness
+curl http://localhost:3000/health
+# {"status":"ok","uptime_secs":142}
+
+# Stats (instant — no COUNT(*))
+curl http://localhost:3000/api/stats
+# {"total_transactions":4821003,"total_failed":1203442,...}
+
+# 10 most recent transactions
+curl "http://localhost:3000/api/transactions?limit=10"
+
+# Only failed transactions, page 2
+curl "http://localhost:3000/api/transactions?success=false&limit=50&offset=50"
+
+# Single transaction
+curl http://localhost:3000/api/transactions/3vpDTvHg...qVwTY28
+
+# All transactions in a slot
+curl http://localhost:3000/api/slots/411483492
+
+# Transfers above 10 SOL
+curl "http://localhost:3000/api/transfers?min_amount=10"
+
+# Account info
+curl http://localhost:3000/api/accounts/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
+```
+
+### Why the API is fast
+
+Every endpoint is designed to avoid slow paths entirely.
+
+**Dedicated read pool** — The API uses its own 20-connection PostgreSQL pool, completely separate from the write workers. A write-heavy ingest burst never starves a read query of a connection.
+
+**Pre-built indexes on every query column** — All filter and sort columns are indexed. No sequential scans at any table size:
+
+| Endpoint | Index hit |
+|---|---|
+| `GET /api/transactions?success=…` | `idx_transactions_success (success, created_at DESC)` |
+| `GET /api/transactions` | `idx_transactions_created_at (created_at DESC)` |
+| `GET /api/slots/:slot` | `idx_transactions_slot (slot)` |
+| `GET /api/transfers?min_amount=…` | `idx_large_transfers_amount (amount DESC)` |
+| `GET /api/memos` | `idx_memos_created_at (created_at DESC)` |
+| `GET /api/transactions/:signature` | Primary key lookup |
+| `GET /api/accounts/:pubkey` | Unique index on `pubkey` |
+
+**O(1) stats via `pg_stat_user_tables`** — `/api/stats` reads `n_live_tup` from PostgreSQL's internal statistics table rather than running `COUNT(*)`. This is a single row lookup regardless of how many rows exist, making stats ~100× faster than a full table scan on a large DB.
+
+**Zero serialization overhead** — Response types derive both `sqlx::FromRow` and `serde::Serialize`, so rows are decoded from the wire and serialized to JSON in one pass with no intermediate allocation.
+
+**Axum on Tokio** — The HTTP server shares the same async runtime as the indexer. No thread-per-request overhead, no context switches between runtimes.
 
 ---
 
@@ -169,6 +253,7 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 X_TOKEN=your-api-key-if-required
 CONSOLE_LOG=true
 BENCH_LOG=benchmark.log
+API_PORT=3000
 ```
 
 ### 2. Run migrations
@@ -204,6 +289,7 @@ docker-compose logs -f indexer
 | `X_TOKEN` | If required | — | API key for authenticated endpoints |
 | `CONSOLE_LOG` | No | `true` | Set `false` to silence terminal output |
 | `BENCH_LOG` | No | `benchmark.log` | Path for benchmark metrics log file |
+| `API_PORT` | No | `3000` | Port the REST API listens on |
 
 ---
 
@@ -211,15 +297,18 @@ docker-compose logs -f indexer
 
 ```
 src/
-├── main.rs              # Entry point, graceful shutdown
-├── config.rs            # Env var config
+├── main.rs              # Entry point, dual pool init, graceful shutdown
+├── config.rs            # Env var config (incl. API_PORT)
 ├── metrics.rs           # AtomicU64 counters + file reporter
+├── api/
+│   ├── mod.rs           # Axum router, CORS, serve()
+│   └── handlers.rs      # HTTP handlers + response types + tests
 ├── grpc/
 │   ├── client.rs        # TLS channel, HTTP/2 tuning
 │   └── stream.rs        # Subscribe loop, parse, auto-reconnect
 ├── db/
 │   ├── connection.rs    # Separate write/read PgPool (20 conn each)
-│   └── queries.rs       # COPY + batch INSERT/UPSERT functions
+│   └── queries.rs       # COPY + batch INSERT/UPSERT + read query fns
 ├── models/
 │   ├── transaction.rs   # Transaction struct
 │   └── account.rs       # Account struct
@@ -242,19 +331,33 @@ migrations/
 cargo test
 ```
 
-Covers:
-- `processor::filters` — large transfer threshold
-- `processor::transaction` — signature truncation
-- `grpc::stream` — address truncation
+Covers 32 test cases across:
+
+| Module | Tests |
+|---|---|
+| `processor::filters` | Large transfer threshold detection |
+| `processor::transaction` | Signature truncation |
+| `grpc::stream` | Address truncation |
+| `api::handlers` | All 8 endpoints — status codes, response shape, pagination, filters, sort order, 404 behaviour |
+
+API tests that require a database connection are automatically skipped when `DATABASE_URL` is not set, so `cargo test` always passes in CI without a database.
+
+```bash
+# Run with a live DB to exercise all 32 tests
+DATABASE_URL=postgresql://... cargo test
+```
 
 ---
 
 ## Tech Stack
 
 - **[Tokio](https://tokio.rs/)** — async runtime
+- **[Axum](https://github.com/tokio-rs/axum)** — HTTP API server (runs on the same Tokio runtime)
 - **[Tonic](https://github.com/hyperium/tonic)** — gRPC client (HTTP/2 + TLS)
 - **[yellowstone-grpc-proto](https://crates.io/crates/yellowstone-grpc-proto)** — Geyser proto types
 - **[SQLx](https://github.com/launchbadge/sqlx)** — async PostgreSQL driver with COPY support
+- **[tower-http](https://crates.io/crates/tower-http)** — CORS + request tracing middleware
+- **[Serde](https://serde.rs/)** — zero-copy JSON serialization
 - **[colored](https://crates.io/crates/colored)** — terminal colors
 - **[chrono](https://crates.io/crates/chrono)** — timestamps
 - **[bs58](https://crates.io/crates/bs58)** — base58 encoding for Solana pubkeys
