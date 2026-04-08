@@ -1,3 +1,4 @@
+mod api;
 mod config;
 mod db;
 mod grpc;
@@ -23,7 +24,10 @@ async fn main() {
     let config = Config::from_env();
 
     println!("{} Connecting to database...", "→".dimmed());
-    let write_pool = db::connection::init_write_pool(&config.database_url).await;
+    let (write_pool, read_pool) = tokio::join!(
+        db::connection::init_write_pool(&config.database_url),
+        db::connection::init_read_pool(&config.database_url),
+    );
     println!("{} Database connected", "✓".green().bold());
 
     println!(
@@ -59,9 +63,11 @@ async fn main() {
         m.clone(),
     ));
     let reporter = tokio::spawn(metrics::start_reporter(m.clone(), 300, config.bench_log));
+    let api_port = config.api_port;
 
     tokio::select! {
         _ = grpc::stream::start_stream(channel, tx_sender, acct_sender, config.x_token, m) => {}
+        _ = api::serve(read_pool, api_port) => {}
         _ = tokio::signal::ctrl_c() => {
             println!("\n{} Shutting down gracefully...", "[INFO]".blue().bold());
         }

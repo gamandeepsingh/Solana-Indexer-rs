@@ -1,26 +1,216 @@
-use sqlx::{PgPool, QueryBuilder};
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use sqlx::{FromRow, PgPool, QueryBuilder};
 
 use crate::models::account::Account;
 use crate::models::transaction::Transaction;
 
-pub async fn upsert_account(pool: &PgPool, account: &Account) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO accounts (pubkey, lamports, slot, executable, rent_epoch)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (pubkey) DO UPDATE SET
-             lamports   = EXCLUDED.lamports,
-             slot       = EXCLUDED.slot,
-             executable = EXCLUDED.executable,
-             rent_epoch = EXCLUDED.rent_epoch",
+#[derive(Debug, FromRow, Serialize)]
+pub struct TxRow {
+    pub signature: String,
+    pub slot: i64,
+    pub success: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow, Serialize)]
+pub struct TransferRow {
+    pub id: i32,
+    pub signature: String,
+    pub slot: i64,
+    pub amount: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow, Serialize)]
+pub struct MemoRow {
+    pub id: i32,
+    pub signature: String,
+    pub memo: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow, Serialize)]
+pub struct AccountRow {
+    pub pubkey: String,
+    pub lamports: i64,
+    pub slot: i64,
+    pub executable: bool,
+    pub rent_epoch: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatsRow {
+    pub total_transactions: i64,
+    pub total_failed: i64,
+    pub total_transfers: i64,
+    pub total_memos: i64,
+    pub total_accounts: i64,
+}
+
+pub async fn read_transactions(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+    success: Option<bool>,
+) -> Result<(Vec<TxRow>, i64), sqlx::Error> {
+    let (rows, total) = match success {
+        Some(s) => {
+            let rows = sqlx::query_as::<_, TxRow>(
+                "SELECT signature, slot, success, created_at FROM transactions
+                 WHERE success = $1
+                 ORDER BY created_at DESC
+                 LIMIT $2 OFFSET $3",
+            )
+            .bind(s)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?;
+            let total: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE success = $1")
+                    .bind(s)
+                    .fetch_one(pool)
+                    .await?;
+            (rows, total)
+        }
+        None => {
+            let rows = sqlx::query_as::<_, TxRow>(
+                "SELECT signature, slot, success, created_at FROM transactions
+                 ORDER BY created_at DESC
+                 LIMIT $1 OFFSET $2",
+            )
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?;
+            let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions")
+                .fetch_one(pool)
+                .await?;
+            (rows, total)
+        }
+    };
+    Ok((rows, total))
+}
+
+pub async fn read_transaction(
+    pool: &PgPool,
+    signature: &str,
+) -> Result<Option<TxRow>, sqlx::Error> {
+    sqlx::query_as::<_, TxRow>(
+        "SELECT signature, slot, success, created_at FROM transactions WHERE signature = $1",
     )
-    .bind(&account.pubkey)
-    .bind(account.lamports)
-    .bind(account.slot)
-    .bind(account.executable)
-    .bind(account.rent_epoch)
-    .execute(pool)
+    .bind(signature)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn read_slot_transactions(
+    pool: &PgPool,
+    slot: i64,
+) -> Result<Vec<TxRow>, sqlx::Error> {
+    sqlx::query_as::<_, TxRow>(
+        "SELECT signature, slot, success, created_at FROM transactions
+         WHERE slot = $1
+         ORDER BY created_at ASC",
+    )
+    .bind(slot)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn read_transfers(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+    min_amount: f64,
+) -> Result<(Vec<TransferRow>, i64), sqlx::Error> {
+    let rows = sqlx::query_as::<_, TransferRow>(
+        "SELECT id, signature, slot, amount, created_at FROM large_transfers
+         WHERE amount >= $1
+         ORDER BY amount DESC
+         LIMIT $2 OFFSET $3",
+    )
+    .bind(min_amount)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
     .await?;
-    Ok(())
+
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM large_transfers WHERE amount >= $1")
+            .bind(min_amount)
+            .fetch_one(pool)
+            .await?;
+
+    Ok((rows, total))
+}
+
+pub async fn read_memos(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+) -> Result<(Vec<MemoRow>, i64), sqlx::Error> {
+    let rows = sqlx::query_as::<_, MemoRow>(
+        "SELECT id, signature, memo, created_at FROM memos
+         ORDER BY created_at DESC
+         LIMIT $1 OFFSET $2",
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memos")
+        .fetch_one(pool)
+        .await?;
+
+    Ok((rows, total))
+}
+
+pub async fn read_account(
+    pool: &PgPool,
+    pubkey: &str,
+) -> Result<Option<AccountRow>, sqlx::Error> {
+    sqlx::query_as::<_, AccountRow>(
+        "SELECT pubkey, lamports, slot, executable, rent_epoch, created_at
+         FROM accounts WHERE pubkey = $1",
+    )
+    .bind(pubkey)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn read_stats(pool: &PgPool) -> Result<StatsRow, sqlx::Error> {
+    let q = |table: &'static str| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(n_live_tup, 0)
+             FROM pg_stat_user_tables
+             WHERE relname = $1",
+        )
+        .bind(table)
+        .fetch_optional(pool)
+        .await
+        .map(|opt| opt.unwrap_or(0))
+    };
+
+    let (total_transactions, total_failed, total_transfers, total_memos, total_accounts) =
+        tokio::try_join!(
+            q("transactions"),
+            q("failed_transactions"),
+            q("large_transfers"),
+            q("memos"),
+            q("accounts"),
+        )?;
+
+    Ok(StatsRow {
+        total_transactions,
+        total_failed,
+        total_transfers,
+        total_memos,
+        total_accounts,
+    })
 }
 
 pub async fn copy_transactions(pool: &PgPool, txs: &[Transaction]) -> Result<(), sqlx::Error> {
