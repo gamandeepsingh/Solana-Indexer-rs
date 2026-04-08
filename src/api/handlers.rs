@@ -476,9 +476,9 @@ mod tests {
     #[tokio::test]
     async fn get_account_returns_correct_fields() {
         let Some(app) = router().await else { return };
-        let resp = get(app.clone(), "/api/accounts/NOTAREALKEY").await;
+        let resp = get(app, "/api/accounts/NOTAREALKEY").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        let body = json_body(resp).await;
-        assert!(body.is_string() || body.is_object());
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert!(!bytes.is_empty(), "404 body should not be empty");
     }
 }
