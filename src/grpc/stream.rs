@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use colored::Colorize;
-use sqlx::PgPool;
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::{self, Sender, UnboundedSender};
 use tokio_stream::StreamExt;
 use tonic::{Request, Status, metadata::MetadataValue, transport::Channel};
 use yellowstone_grpc_proto::geyser::{
@@ -12,18 +14,60 @@ use yellowstone_grpc_proto::geyser::{
     geyser_client::GeyserClient, subscribe_update::UpdateOneof,
 };
 
-use crate::db::queries::upsert_account;
+use crate::metrics::Metrics;
 use crate::models::account::Account;
 use crate::models::transaction::Transaction;
 
 const MEMO_V1: &str = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
 const MEMO_V2: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+const RECONNECT_BASE_SECS: u64 = 2;
+const RECONNECT_MAX_SECS: u64 = 30;
+const RECONNECT_RESET_SECS: u64 = 60;
 
 pub async fn start_stream(
     channel: Channel,
-    tx_queue: Sender<Transaction>,
-    db: PgPool,
+    tx_queue: UnboundedSender<Transaction>,
+    acct_queue: Sender<Account>,
     x_token: Option<String>,
+    metrics: Arc<Metrics>,
+) {
+    let mut attempt: u32 = 0;
+
+    loop {
+        let started = tokio::time::Instant::now();
+
+        run_once(
+            channel.clone(),
+            &tx_queue,
+            &acct_queue,
+            &x_token,
+            &metrics,
+        )
+        .await;
+
+        if started.elapsed().as_secs() >= RECONNECT_RESET_SECS {
+            attempt = 0;
+        }
+
+        attempt += 1;
+        let delay = (RECONNECT_BASE_SECS * 2u64.pow(attempt.min(4))).min(RECONNECT_MAX_SECS);
+
+        eprintln!(
+            "{} Stream ended — reconnecting in {}s (attempt {})...",
+            "[WARN]".yellow().bold(),
+            delay,
+            attempt,
+        );
+        tokio::time::sleep(Duration::from_secs(delay)).await;
+    }
+}
+
+async fn run_once(
+    channel: Channel,
+    tx_queue: &UnboundedSender<Transaction>,
+    acct_queue: &Sender<Account>,
+    x_token: &Option<String>,
+    metrics: &Arc<Metrics>,
 ) {
     let (tx, rx) = mpsc::channel::<SubscribeRequest>(128);
 
@@ -57,9 +101,10 @@ pub async fn start_stream(
 
     let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
+    let token = x_token.clone();
     let mut client = GeyserClient::with_interceptor(channel, move |mut req: Request<()>| {
-        if let Some(ref token) = x_token {
-            let val = MetadataValue::try_from(token.as_str())
+        if let Some(ref t) = token {
+            let val = MetadataValue::try_from(t.as_str())
                 .map_err(|_| Status::internal("Invalid x-token value"))?;
             req.metadata_mut().insert("x-token", val);
         }
@@ -79,22 +124,19 @@ pub async fn start_stream(
         match message {
             Ok(update) => match update.update_oneof {
                 Some(UpdateOneof::Transaction(tx_update)) => {
+                    metrics.tx_received.fetch_add(1, Ordering::Relaxed);
                     if let Some(acct) = extract_fee_payer(&tx_update) {
-                        let db_clone = db.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = upsert_account(&db_clone, &acct).await {
-                                eprintln!("{} upsert_account: {e}", "[ERROR]".red().bold());
-                            }
-                        });
+                        let _ = acct_queue.try_send(acct);
                     }
                     if let Some(parsed) = parse_transaction(&tx_update) {
-                        if tx_queue.send(parsed).await.is_err() {
+                        if tx_queue.send(parsed).is_err() {
                             eprintln!("{} Worker queue closed", "[ERROR]".red().bold());
                             return;
                         }
                     }
                 }
                 Some(UpdateOneof::Slot(slot)) => {
+                    metrics.slots.fetch_add(1, Ordering::Relaxed);
                     let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
                     let parent = slot
                         .parent
@@ -113,8 +155,6 @@ pub async fn start_stream(
             Err(e) => eprintln!("{} Stream: {e:?}", "[ERROR]".red().bold()),
         }
     }
-
-    eprintln!("{} gRPC stream ended", "[WARN]".yellow().bold());
 }
 
 fn extract_fee_payer(tx_update: &SubscribeUpdateTransaction) -> Option<Account> {
@@ -228,7 +268,10 @@ fn extract_memo(tx_info: &SubscribeUpdateTransactionInfo) -> Option<String> {
     for ix in &msg.instructions {
         if ix.program_id_index as usize == memo_idx {
             if let Ok(s) = std::str::from_utf8(&ix.data) {
-                return Some(s.to_string());
+                let clean: String = s.chars().filter(|&c| c != '\0').collect();
+                if !clean.is_empty() {
+                    return Some(clean);
+                }
             }
         }
     }
@@ -238,7 +281,10 @@ fn extract_memo(tx_info: &SubscribeUpdateTransactionInfo) -> Option<String> {
             for ix in &inner.instructions {
                 if ix.program_id_index as usize == memo_idx {
                     if let Ok(s) = std::str::from_utf8(&ix.data) {
-                        return Some(s.to_string());
+                        let clean: String = s.chars().filter(|&c| c != '\0').collect();
+                        if !clean.is_empty() {
+                            return Some(clean);
+                        }
                     }
                 }
             }
